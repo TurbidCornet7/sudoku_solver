@@ -1,102 +1,121 @@
-(* Sudoku solver using Z3 *)
-
 open Z3
-open Z3.Arithmetic.Integer
-open Z3.Boolean
-open Z3.Solver
-open Z3.Arithmetic
-open Z3.Model
+(**
+    Sudoku solver using z3
+    *)
 
-let solve_sudoku grid =
-  let ctx = mk_context [] in
-  let solver = mk_solver ctx None in
-  let cells = Array.make_matrix 9 9 (mk_numeral_s ctx "x") in
+let int_of_expr e = Z.to_int (Arithmetic.Integer.get_big_int e)
 
-  for i = 0 to 8 do
-    for j = 0 to 8 do
-      let cell = cells.(i).(j) in
-      Solver.add solver
-        [
-          mk_le ctx (mk_numeral_i ctx 1) cell;
-          mk_le ctx cell (mk_numeral_i ctx 9);
-        ]
-    done
-  done;
-
-  for i = 0 to 8 do
-    let row = Array.to_list (Array.init 9 (fun j -> cells.(i).(j))) in
-    Solver.add solver [ mk_distinct ctx row ]
-  done;
-
-  for j = 0 to 8 do
-    let col = Array.to_list (Array.init 9 (fun i -> cells.(i).(j))) in
-    Solver.add solver [ mk_distinct ctx col ]
-  done;
-
-  for i = 0 to 2 do
-    for j = 0 to 2 do
-      let square =
-        Array.to_list
-          (Array.init 9 (fun k ->
-               cells.((3 * i) + (k / 3)).((3 * j) + (k mod 3))))
-      in
-      Solver.add solver [ mk_distinct ctx square ]
-    done
-  done;
-
-  for i = 0 to 8 do
-    for j = 0 to 8 do
-      match grid.(i).(j) with
-      | None -> ()
-      | Some n ->
-          Solver.add solver [ mk_eq ctx cells.(i).(j) (mk_numeral_i ctx n) ]
-    done
-  done;
-
-  match Solver.check solver [] with
-  | SATISFIABLE ->
-      let model = get_model solver in
-      let model = Option.get model in
-      let solution =
-        Array.init 9 (fun i ->
-            Array.init 9 (fun j ->
-                match get_const_interp_e model cells.(i).(j) with
-                | Some n -> numeral_to_string n
-                | None -> "-"))
-      in
-      solution
-  | _ -> failwith "Unsolvable"
-
-let read_grid_from_file file_name =
-  let ic = open_in file_name in
-  let grid = Array.make_matrix 9 9 None in
+(*abifunktsioon laua lugemiseks failist, tuhi koht on margistatud _ iga ja eraldatud tuhikuga*)
+let read_board filename =
+  let board = Array.make_matrix 9 9 0 in
+  let ic = open_in filename in
   try
     for i = 0 to 8 do
       let line = input_line ic in
-      let values = String.split_on_char ' ' line in
-      List.iteri
-        (fun j v ->
-          grid.(i).(j) <- (if v = "_" then None else Some (int_of_string v)))
-        values
+      let cells = String.split_on_char ' ' line in
+      for j = 0 to 8 do
+        board.(i).(j) <-
+          (match List.nth cells j with "_" -> 0 | v -> int_of_string v)
+      done
     done;
     close_in ic;
-    grid
-  with _ ->
-    close_in ic;
-    failwith "Invalid grid"
+    board
+  with e ->
+    close_in_noerr ic;
+    raise e
 
-let print_solution solution =
-  Array.iter
-    (fun row ->
-      Array.iter print_string row;
-      print_newline ())
-    solution
+(*abifunktsioon laua printimiseks*)
+let print_board board =
+  print_endline "-------------------------";
+  for i = 0 to 8 do
+    print_string "| ";
+    for j = 0 to 8 do
+      print_int board.(i).(j);
+      print_string " ";
+      if (j + 1) mod 3 = 0 then print_string "| "
+    done;
+    print_endline "";
+    if (i + 1) mod 3 = 0 then print_endline "-------------------------"
+  done
 
+(* sudoku lahendaja*)
+let solve_sudoku board =
+  let ctx = mk_context [ ("model", "true") ] in
+  let solver = Solver.mk_simple_solver ctx in
+  let cells =
+    Array.init 9 (fun i ->
+        Array.init 9 (fun j ->
+            Arithmetic.Integer.mk_const_s ctx (Printf.sprintf "cell_%d_%d" i j)))
+  in
+  let cell_constraints =
+    List.init 9 (fun i ->
+        List.init 9 (fun j ->
+            Boolean.mk_and ctx
+              [
+                Arithmetic.mk_le ctx
+                  (Arithmetic.Integer.mk_numeral_i ctx 1)
+                  cells.(i).(j);
+                Arithmetic.mk_le ctx
+                  cells.(i).(j)
+                  (Arithmetic.Integer.mk_numeral_i ctx 9);
+              ]))
+  in
+  (* rea piirangud*)
+  let row_constraints =
+    List.init 9 (fun i -> Boolean.mk_distinct ctx (Array.to_list cells.(i)))
+  in
+  (* veeru piirangud*)
+  let column_constraints =
+    List.init 9 (fun j ->
+        Boolean.mk_distinct ctx (List.init 9 (fun i -> cells.(i).(j))))
+  in
+  (* ruudu piirangud *)
+  let box_constraints =
+    List.init 3 (fun i ->
+        List.init 3 (fun j ->
+            Boolean.mk_distinct ctx
+              (List.init 3 (fun k ->
+                   List.init 3 (fun l -> cells.((3 * i) + k).((3 * j) + l)))
+              |> List.flatten)))
+  in
+  (*sisestatud väärtused*)
+  let value_constraints =
+    List.init 9 (fun i ->
+        List.init 9 (fun j ->
+            match board.(i).(j) with
+            | 0 -> Boolean.mk_true ctx
+            | v ->
+                Boolean.mk_eq ctx
+                  cells.(i).(j)
+                  (Arithmetic.Integer.mk_numeral_i ctx v)))
+  in
+  let status =
+    Solver.check solver
+      (List.flatten cell_constraints
+      @ List.flatten value_constraints
+      @ row_constraints @ column_constraints
+      @ List.flatten box_constraints)
+  in
+  match status with
+  | Solver.SATISFIABLE ->
+      let model = Option.get (Solver.get_model solver) in
+      let board =
+        Array.map
+          (fun row ->
+            Array.map
+              (fun cell ->
+                int_of_expr (Option.get (Model.get_const_interp_e model cell)))
+              row)
+          cells
+      in
+      print_board board
+  | Solver.UNSATISFIABLE -> print_endline "unsat"
+  | Solver.UNKNOWN -> print_endline "unknown"
+
+(*main, kusib failinime*)
 let () =
-  print_endline "Sudoku solver using Z3";
-  print_endline "Enter the file name containing the grid:";
-  let file_name = read_line () in
-  let grid = read_grid_from_file file_name in
-  let solution = solve_sudoku grid in
-  print_endline "Solution:";
-  print_solution solution
+  print_endline "Sudoku solver";
+  print_endline "Enter filename:";
+  let filename = read_line () in
+  let board = read_board filename in
+  solve_sudoku board
